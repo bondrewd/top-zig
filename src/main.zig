@@ -1,8 +1,15 @@
 // Modules
 const std = @import("std");
+const fs = std.fs;
 const mem = std.mem;
 const testing = std.testing;
+// Types
+const File = fs.File;
+const Allocator = mem.Allocator;
+const ArrayList = std.ArrayList;
 // Functions
+const eql = mem.eql;
+const copy = mem.copy;
 const trim = mem.trim;
 const indexOf = mem.indexOf;
 const startsWith = mem.startsWith;
@@ -41,6 +48,64 @@ pub fn getIncludePath(line: []const u8) ![]const u8 {
     if (indexOf(u8, path, " ") != null) return error.InvalidPath;
 
     return path;
+}
+
+pub fn isDirective(line: []const u8) bool {
+    // Remove comment
+    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+    const directive = line[0..semicolon];
+    // Get delimiter indexes
+    const i = if (indexOf(u8, directive, "[")) |index| index else return false;
+    const j = if (indexOf(u8, directive, "]")) |index| index else return false;
+    // Extract name
+    const name = trim(u8, directive[i + 1 .. j], " ");
+    // Check name is not empty
+    if (name.len == 0) return false;
+    // Check name does not contains blanks
+    if (indexOf(u8, name, " ") != null) return false;
+
+    return true;
+}
+
+pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator) ![][]const u8 {
+    // Initialize list
+    var directive_lines = ArrayList([]const u8).init(allocator);
+    // Initialize buffer
+    var buffer = [_]u8{0} ** 1000;
+    // File position
+    var pos = try file.getPos();
+    // Get file reader
+    const reader = file.reader();
+
+    // Read until the directive is found
+    while (try reader.readUntilDelimiterOrEof(buffer, '\n')) |line| {
+        const found_directive = getDirectiveName(line) catch continue;
+        if (eql(u8, directive, found_directive)) break;
+        // Update position
+        pos = try file.getPos();
+    }
+
+    // Save lines
+    while (try reader.readUntilDelimiterOrEof(buffer, '\n')) |line| {
+        // Stop if a new directive is found
+        if (isDirective(line)) break;
+        // Remove comment
+        const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+        const content = line[0..semicolon];
+        // Skip if line is empty
+        if (content.len == 0) continue;
+        // Save content
+        var directive_line = try allocator.alloc(u8, content.len);
+        copy(u8, directive_line, content);
+        try directive_lines.append(directive_line);
+        // Update position
+        pos = try file.getPos();
+    }
+
+    // Position file before directive block ends
+    try file.seekTo(pos);
+
+    return directive_lines.toOwnedSlice();
 }
 
 test "getDirectiveName" {
