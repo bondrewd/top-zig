@@ -67,9 +67,9 @@ pub fn isDirective(line: []const u8) bool {
     return true;
 }
 
-pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator) ![][]const u8 {
+pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocator) ![][]const u8 {
     // Initialize list
-    var directive_lines = ArrayList([]const u8).init(allocator);
+    var directive_content = ArrayList([]const u8).init(allocator);
     // Initialize buffer
     var buffer = [_]u8{0} ** 1000;
     // File position
@@ -79,33 +79,34 @@ pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator
 
     // Read until the directive is found
     while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
-        const found_directive = getDirectiveName(line) catch continue;
-        if (eql(u8, directive, found_directive)) break;
         // Update position
         pos = try file.getPos();
+        // Parse directive
+        const found_directive = getDirectiveName(line) catch continue;
+        if (eql(u8, directive, found_directive)) break;
     }
 
     // Save lines
     while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
         // Stop if a new directive is found
         if (isDirective(line)) break;
+        // Update position
+        pos = try file.getPos();
         // Remove comment
         const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
         const content = line[0..semicolon];
         // Skip if line is empty
         if (content.len == 0) continue;
         // Save content
-        var directive_line = try allocator.alloc(u8, content.len);
-        copy(u8, directive_line, content);
-        try directive_lines.append(directive_line);
-        // Update position
-        pos = try file.getPos();
+        var directive_content_line = try allocator.alloc(u8, content.len);
+        copy(u8, directive_content_line, content);
+        try directive_content.append(directive_content_line);
     }
 
     // Position file before directive block ends
     try file.seekTo(pos);
 
-    return directive_lines.toOwnedSlice();
+    return directive_content.toOwnedSlice();
 }
 
 test "Top getDirectiveName" {
@@ -199,18 +200,38 @@ test "Top getDirectiveLines" {
     try w.print("{s}", .{
         \\[ foo ]
         \\a
-        \\b
-        \\c
+        \\
+        \\b 1.23
+        \\; comment 1
+        \\
+        \\c 1.0 1.0
+        \\
+        \\[ bar ]
+        \\d
+        \\e
+        \\; comment 2
+        \\
     });
 
     try top.seekTo(0);
 
-    const lines = try getDirectiveLines(top, "foo", testing.allocator);
-    defer testing.allocator.free(lines);
-    defer for (lines) |line| testing.allocator.free(line);
+    const content = try getDirectiveContent(top, "foo", testing.allocator);
+    defer testing.allocator.free(content);
+    defer for (content) |content_line| testing.allocator.free(content_line);
 
-    try testing.expect(lines.len == 3);
-    try testing.expectEqualSlices(u8, lines[0], "a"[0..]);
-    try testing.expectEqualSlices(u8, lines[1], "b"[0..]);
-    try testing.expectEqualSlices(u8, lines[2], "c"[0..]);
+    try testing.expect(content.len == 3);
+    try testing.expectEqualSlices(u8, content[0], "a"[0..]);
+    try testing.expectEqualSlices(u8, content[1], "b 1.23"[0..]);
+    try testing.expectEqualSlices(u8, content[2], "c 1.0 1.0"[0..]);
+
+    const rest = try top.reader().readAllAlloc(testing.allocator, 1024);
+    defer testing.allocator.free(rest);
+
+    try testing.expectEqualSlices(u8,
+        \\[ bar ]
+        \\d
+        \\e
+        \\; comment 2
+        \\
+    [0..], rest);
 }
