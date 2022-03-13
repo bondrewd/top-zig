@@ -4,6 +4,7 @@ const fs = std.fs;
 const mem = std.mem;
 const testing = std.testing;
 // Types
+const Dir = fs.Dir;
 const File = fs.File;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -29,25 +30,6 @@ pub fn getDirectiveName(line: []const u8) ![]const u8 {
     if (indexOf(u8, name, " ") != null) return error.InvalidDirectiveName;
 
     return name;
-}
-
-pub fn getIncludePath(line: []const u8) ![]const u8 {
-    // Remove comment
-    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
-    const include = line[0..semicolon];
-    // Check keyword is present
-    if (!startsWith(u8, include, "#include")) return error.MissingKeyword;
-    // Get delimiter index
-    const i = if (indexOf(u8, include, "\"")) |index| index else return error.MissingDelimiter;
-    const j = if (indexOf(u8, include[i + 1 ..], "\"")) |index| index + i + 1 else return error.MissingDelimiter;
-    // Extract path
-    const path = trim(u8, include[i + 1 .. j], " ");
-    // Check path is not empty
-    if (path.len == 0) return error.MissingPath;
-    // Check path does not contains blanks
-    if (indexOf(u8, path, " ") != null) return error.InvalidPath;
-
-    return path;
 }
 
 pub fn isDirective(line: []const u8) bool {
@@ -109,6 +91,83 @@ pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocat
     return directive_content.toOwnedSlice();
 }
 
+pub fn getIncludePath(line: []const u8) ![]const u8 {
+    // Remove comment
+    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+    const include = line[0..semicolon];
+    // Check keyword is present
+    if (!startsWith(u8, include, "#include")) return error.MissingKeyword;
+    // Get delimiter index
+    const i = if (indexOf(u8, include, "\"")) |index| index else return error.MissingDelimiter;
+    const j = if (indexOf(u8, include[i + 1 ..], "\"")) |index| index + i + 1 else return error.MissingDelimiter;
+    // Extract path
+    const path = trim(u8, include[i + 1 .. j], " ");
+    // Check path is not empty
+    if (path.len == 0) return error.MissingPath;
+    // Check path does not contains blanks
+    if (indexOf(u8, path, " ") != null) return error.InvalidPath;
+
+    return path;
+}
+
+pub fn isIncludePath(line: []const u8) bool {
+    // Remove comment
+    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+    const include = line[0..semicolon];
+    // Check keyword is present
+    if (!startsWith(u8, include, "#include")) return false;
+    // Get delimiter index
+    const i = if (indexOf(u8, include, "\"")) |index| index else return false;
+    const j = if (indexOf(u8, include[i + 1 ..], "\"")) |index| index + i + 1 else return false;
+    // Extract path
+    const path = trim(u8, include[i + 1 .. j], " ");
+    // Check path is not empty
+    if (path.len == 0) return false;
+    // Check path does not contains blanks
+    if (indexOf(u8, path, " ") != null) return false;
+
+    return true;
+}
+
+pub fn writeMonolith(writer: anytype, dir: Dir, file_name: []const u8, allocator: Allocator) anyerror!void {
+    // Reading buffer
+    var buffer = try allocator.alloc(u8, 1024);
+    defer allocator.free(buffer);
+    // Open file
+    var file = try dir.openFile(file_name, .{});
+    // File reader
+    var reader = file.reader();
+
+    // Read until the directive is found
+    while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
+        // Remove comment
+        const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+        const content_line = line[0..semicolon];
+        // Trim content
+        const content = trim(u8, content_line, " ");
+        // Skip if line is empty
+        if (content.len == 0) continue;
+        // Write content
+        if (isIncludePath(content)) {
+            // Get path
+            const path = try getIncludePath(content);
+            // Write recursively
+            try writeMonolith(writer, dir, path, allocator);
+        } else {
+            try writer.print("{s}\n", .{content});
+        }
+    }
+}
+
+pub fn createMonolith(dir: Dir, file_name: []const u8, allocator: Allocator) anyerror![]u8 {
+    // Initialize monolith
+    var monolith = ArrayList(u8).init(allocator);
+    // Create monolith
+    try writeMonolith(monolith.writer(), dir, file_name, allocator);
+
+    return monolith.toOwnedSlice();
+}
+
 test "Top getDirectiveName" {
     const directive1 = "[ foo ]";
     try testing.expectEqualSlices(u8, "foo", try getDirectiveName(directive1));
@@ -150,6 +209,53 @@ test "Top getDirectiveName" {
     try testing.expectError(error.InvalidDirectiveName, getDirectiveName(bad9));
 }
 
+test "Top getDirectiveLines" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = tmp.dir;
+
+    var top = try handle.createFile("tmp.top", .{ .read = true });
+    defer top.close();
+
+    try top.writer().writeAll(
+        \\[ foo ]
+        \\a
+        \\
+        \\b 1.23
+        \\; comment 1
+        \\
+        \\c 1.0 1.0
+        \\
+        \\[ bar ]
+        \\d
+        \\e
+        \\; comment 2
+        \\
+    );
+
+    try top.seekTo(0);
+
+    const content = try getDirectiveContent(top, "foo", testing.allocator);
+    defer testing.allocator.free(content);
+    defer for (content) |content_line| testing.allocator.free(content_line);
+
+    try testing.expect(content.len == 3);
+    try testing.expectEqualSlices(u8, content[0], "a"[0..]);
+    try testing.expectEqualSlices(u8, content[1], "b 1.23"[0..]);
+    try testing.expectEqualSlices(u8, content[2], "c 1.0 1.0"[0..]);
+
+    const rest = try top.reader().readAllAlloc(testing.allocator, 1024);
+    defer testing.allocator.free(rest);
+
+    try testing.expectEqualSlices(u8,
+        \\[ bar ]
+        \\d
+        \\e
+        \\; comment 2
+        \\
+    [0..], rest);
+}
+
 test "Top getIncludePath" {
     const include1 = "#include \"/home/foo\"";
     try testing.expectEqualSlices(u8, "/home/foo", try getIncludePath(include1));
@@ -188,7 +294,7 @@ test "Top getIncludePath" {
     try testing.expectError(error.InvalidPath, getIncludePath(bad9));
 }
 
-test "Top getDirectiveLines" {
+test "Top writeMonolith" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const handle = tmp.dir;
@@ -196,8 +302,7 @@ test "Top getDirectiveLines" {
     var top = try handle.createFile("tmp.top", .{ .read = true });
     defer top.close();
 
-    const w = top.writer();
-    try w.print("{s}", .{
+    try top.writer().writeAll(
         \\[ foo ]
         \\a
         \\
@@ -208,30 +313,152 @@ test "Top getDirectiveLines" {
         \\
         \\[ bar ]
         \\d
-        \\e
+        \\e ; with extra comment
         \\; comment 2
         \\
-    });
+    );
 
     try top.seekTo(0);
 
-    const content = try getDirectiveContent(top, "foo", testing.allocator);
-    defer testing.allocator.free(content);
-    defer for (content) |content_line| testing.allocator.free(content_line);
+    var monolith = ArrayList(u8).init(testing.allocator);
+    defer monolith.deinit();
 
-    try testing.expect(content.len == 3);
-    try testing.expectEqualSlices(u8, content[0], "a"[0..]);
-    try testing.expectEqualSlices(u8, content[1], "b 1.23"[0..]);
-    try testing.expectEqualSlices(u8, content[2], "c 1.0 1.0"[0..]);
+    try writeMonolith(monolith.writer(), handle, "tmp.top", testing.allocator);
 
-    const rest = try top.reader().readAllAlloc(testing.allocator, 1024);
-    defer testing.allocator.free(rest);
-
-    try testing.expectEqualSlices(u8,
+    try testing.expectEqualStrings(
+        \\[ foo ]
+        \\a
+        \\b 1.23
+        \\c 1.0 1.0
         \\[ bar ]
         \\d
         \\e
-        \\; comment 2
         \\
-    [0..], rest);
+    , monolith.items);
+}
+
+test "Top writeMonolith with include path" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = tmp.dir;
+
+    var itp1 = try handle.createFile("tmp1.itp", .{ .read = true });
+    defer itp1.close();
+
+    try itp1.writer().writeAll(
+        \\; comment
+        \\[ foo ]
+        \\a
+        \\b
+        \\
+        \\; final comment
+        \\
+    );
+
+    try itp1.seekTo(0);
+
+    var itp2 = try handle.createFile("tmp2.itp", .{ .read = true });
+    defer itp2.close();
+
+    try itp2.writer().writeAll(
+        \\; comment
+        \\[ baz ]
+        \\e
+        \\f
+        \\; comment for the next line
+        \\g
+        \\
+    );
+
+    try itp2.seekTo(0);
+
+    var top = try handle.createFile("tmp.top", .{ .read = true });
+    defer top.close();
+
+    try top.writer().writeAll(
+        \\; comment
+        \\#include "./tmp1.itp"
+        \\
+        \\; comment
+        \\[ bar ]
+        \\c
+        \\
+        \\d
+        \\
+        \\;comment
+        \\#include "./tmp2.itp"
+        \\
+        \\[ cux ]
+        \\h
+        \\
+    );
+
+    try top.seekTo(0);
+
+    var monolith = ArrayList(u8).init(testing.allocator);
+    defer monolith.deinit();
+
+    try writeMonolith(monolith.writer(), handle, "tmp.top", testing.allocator);
+
+    try testing.expectEqualStrings(
+        \\[ foo ]
+        \\a
+        \\b
+        \\[ bar ]
+        \\c
+        \\d
+        \\[ baz ]
+        \\e
+        \\f
+        \\g
+        \\[ cux ]
+        \\h
+        \\
+    , monolith.items);
+}
+
+test "Top createMonolith" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = tmp.dir;
+
+    var itp = try handle.createFile("tmp.itp", .{ .read = true });
+    defer itp.close();
+
+    try itp.writer().writeAll(
+        \\[ foo ]
+        \\a
+        \\b
+        \\c
+        \\
+    );
+
+    try itp.seekTo(0);
+
+    var top = try handle.createFile("tmp.top", .{ .read = true });
+    defer top.close();
+
+    try top.writer().writeAll(
+        \\#include "./tmp.itp"
+        \\[ bar ]
+        \\d
+        \\e
+        \\
+    );
+
+    try top.seekTo(0);
+
+    var monolith = try createMonolith(handle, "tmp.top", testing.allocator);
+    defer testing.allocator.free(monolith);
+
+    try testing.expectEqualStrings(
+        \\[ foo ]
+        \\a
+        \\b
+        \\c
+        \\[ bar ]
+        \\d
+        \\e
+        \\
+    , monolith);
 }
