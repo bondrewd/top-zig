@@ -13,6 +13,7 @@ const eql = mem.eql;
 const copy = mem.copy;
 const trim = mem.trim;
 const indexOf = mem.indexOf;
+const tokenize = mem.tokenize;
 const startsWith = mem.startsWith;
 
 pub fn getDirectiveName(line: []const u8) ![]const u8 {
@@ -49,9 +50,11 @@ pub fn isDirective(line: []const u8) bool {
     return true;
 }
 
-pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocator) ![][]const u8 {
+pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocator) ![]const u8 {
     // Initialize list
-    var directive_content = ArrayList([]const u8).init(allocator);
+    var directive_content = ArrayList(u8).init(allocator);
+    // Get writer
+    const writer = directive_content.writer();
     // Initialize buffer
     var buffer = [_]u8{0} ** 1000;
     // File position
@@ -80,9 +83,7 @@ pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocat
         // Skip if line is empty
         if (content.len == 0) continue;
         // Save content
-        var directive_content_line = try allocator.alloc(u8, content.len);
-        copy(u8, directive_content_line, content);
-        try directive_content.append(directive_content_line);
+        try writer.print("{s}\n", .{content});
     }
 
     // Position file before directive block ends
@@ -237,12 +238,12 @@ test "Top getDirectiveLines" {
 
     const content = try getDirectiveContent(top, "foo", testing.allocator);
     defer testing.allocator.free(content);
-    defer for (content) |content_line| testing.allocator.free(content_line);
 
-    try testing.expect(content.len == 3);
-    try testing.expectEqualSlices(u8, content[0], "a"[0..]);
-    try testing.expectEqualSlices(u8, content[1], "b 1.23"[0..]);
-    try testing.expectEqualSlices(u8, content[2], "c 1.0 1.0"[0..]);
+    var lines = tokenize(u8, content, "\n");
+
+    try testing.expectEqualSlices(u8, lines.next().?, "a"[0..]);
+    try testing.expectEqualSlices(u8, lines.next().?, "b 1.23"[0..]);
+    try testing.expectEqualSlices(u8, lines.next().?, "c 1.0 1.0"[0..]);
 
     const rest = try top.reader().readAllAlloc(testing.allocator, 1024);
     defer testing.allocator.free(rest);
