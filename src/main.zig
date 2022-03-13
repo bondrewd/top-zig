@@ -1,6 +1,7 @@
 // Modules
 const std = @import("std");
 const fs = std.fs;
+const io = std.io;
 const mem = std.mem;
 const testing = std.testing;
 // Types
@@ -8,13 +9,16 @@ const Dir = fs.Dir;
 const File = fs.File;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
+const FixedBufferStream = io.FixedBufferStream;
 // Functions
 const eql = mem.eql;
 const copy = mem.copy;
 const trim = mem.trim;
+const split = mem.split;
 const indexOf = mem.indexOf;
 const tokenize = mem.tokenize;
 const startsWith = mem.startsWith;
+const fixedBufferStream = io.fixedBufferStream;
 
 pub fn getDirectiveName(line: []const u8) ![]const u8 {
     // Remove comment
@@ -50,46 +54,43 @@ pub fn isDirective(line: []const u8) bool {
     return true;
 }
 
-pub fn getDirectiveContent(file: File, directive: []const u8, allocator: Allocator) ![]const u8 {
-    // Initialize list
-    var directive_content = ArrayList(u8).init(allocator);
-    // Get writer
-    const writer = directive_content.writer();
-    // Initialize buffer
-    var buffer = [_]u8{0} ** 1000;
-    // File position
-    var pos = try file.getPos();
-    // Get file reader
-    const reader = file.reader();
+const GetDirectiveContentResult = struct {
+    data: ?[]const u8,
+    pos: usize,
+};
 
-    // Read until the directive is found
-    while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
+pub fn getDirectiveContent(monolith: []const u8, directive: []const u8) !GetDirectiveContentResult {
+    // Directive index
+    var start: usize = 0;
+    var end: usize = 0;
+    // Get monolith reader
+    var it = split(u8, monolith, "\n");
+
+    // Read lines until the directive is found
+    while (it.next()) |line| {
         // Update position
-        pos = try file.getPos();
+        start += line.len + 1;
+        end += line.len + 1;
         // Parse directive
         const found_directive = getDirectiveName(line) catch continue;
         if (eql(u8, directive, found_directive)) break;
     }
 
-    // Save lines
-    while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
+    // Read lines unitl next directive
+    while (it.next()) |line| {
         // Stop if a new directive is found
         if (isDirective(line)) break;
         // Update position
-        pos = try file.getPos();
-        // Remove comment
-        const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
-        const content = line[0..semicolon];
-        // Skip if line is empty
-        if (content.len == 0) continue;
-        // Save content
-        try writer.print("{s}\n", .{content});
+        end += line.len + 1;
     }
 
-    // Position file before directive block ends
-    try file.seekTo(pos);
+    // If EOF correct for extra \n character counted
+    if (it.next() == null) end -= 1;
 
-    return directive_content.toOwnedSlice();
+    return GetDirectiveContentResult{
+        .data = if (start == end) null else monolith[start..end],
+        .pos = end,
+    };
 }
 
 pub fn getIncludePath(line: []const u8) ![]const u8 {
@@ -169,6 +170,36 @@ pub fn createMonolith(dir: Dir, file_name: []const u8, allocator: Allocator) any
     return monolith.toOwnedSlice();
 }
 
+pub const SystemDirective = struct {
+    allocator: Allocator,
+    name: []u8,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .name = undefined,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.name);
+    }
+
+    pub fn setName(self: *Self, name: []const u8) !void {
+        self.name = try self.allocator.alloc(u8, name.len);
+        copy(u8, self.name, name);
+    }
+
+    pub fn parseMonolith(self: *Self, monolith: []const u8) !void {
+        const content = try getDirectiveContent(monolith, "system");
+        const data = if (content.data) |data| data else "";
+        const name = trim(u8, data, "\n");
+        try self.setName(name);
+    }
+};
+
 test "Top getDirectiveName" {
     const directive1 = "[ foo ]";
     try testing.expectEqualSlices(u8, "foo", try getDirectiveName(directive1));
@@ -210,51 +241,41 @@ test "Top getDirectiveName" {
     try testing.expectError(error.InvalidDirectiveName, getDirectiveName(bad9));
 }
 
-test "Top getDirectiveLines" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const handle = tmp.dir;
-
-    var top = try handle.createFile("tmp.top", .{ .read = true });
-    defer top.close();
-
-    try top.writer().writeAll(
+test "Top getDirectiveContent" {
+    const monolith =
         \\[ foo ]
         \\a
         \\
         \\b 1.23
-        \\; comment 1
-        \\
-        \\c 1.0 1.0
-        \\
         \\[ bar ]
-        \\d
-        \\e
-        \\; comment 2
+        \\[ baz ]
+        \\c
         \\
-    );
+    ;
 
-    try top.seekTo(0);
+    var content = try getDirectiveContent(monolith, "foo");
 
-    const content = try getDirectiveContent(top, "foo", testing.allocator);
-    defer testing.allocator.free(content);
+    try testing.expectEqual(@as(usize, 18), content.pos);
+    try testing.expect(content.data != null);
 
-    var lines = tokenize(u8, content, "\n");
-
+    var lines = tokenize(u8, content.data.?, "\n");
     try testing.expectEqualSlices(u8, lines.next().?, "a"[0..]);
     try testing.expectEqualSlices(u8, lines.next().?, "b 1.23"[0..]);
-    try testing.expectEqualSlices(u8, lines.next().?, "c 1.0 1.0"[0..]);
+    try testing.expect(lines.next() == null);
 
-    const rest = try top.reader().readAllAlloc(testing.allocator, 1024);
-    defer testing.allocator.free(rest);
+    content = try getDirectiveContent(monolith, "bar");
 
-    try testing.expectEqualSlices(u8,
-        \\[ bar ]
-        \\d
-        \\e
-        \\; comment 2
-        \\
-    [0..], rest);
+    try testing.expectEqual(@as(usize, 26), content.pos);
+    try testing.expect(content.data == null);
+
+    content = try getDirectiveContent(monolith, "baz");
+
+    try testing.expectEqual(@as(usize, 36), content.pos);
+    try testing.expect(content.data != null);
+
+    lines = tokenize(u8, content.data.?, "\n");
+    try testing.expectEqualSlices(u8, lines.next().?, "c"[0..]);
+    try testing.expect(lines.next() == null);
 }
 
 test "Top getIncludePath" {
@@ -462,4 +483,22 @@ test "Top createMonolith" {
         \\e
         \\
     , monolith);
+}
+
+test "Top SystemDirective" {
+    var system_directive = SystemDirective.init(testing.allocator);
+    defer system_directive.deinit();
+
+    const monolith =
+        \\[ foo ]
+        \\a
+        \\[ system ]
+        \\POPC membrane
+        \\[ bar ]
+        \\b
+        \\
+    ;
+
+    try system_directive.parseMonolith(monolith);
+    try testing.expectEqualStrings(system_directive.name, "POPC membrane");
 }
