@@ -78,7 +78,7 @@ pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator
     const reader = file.reader();
 
     // Read until the directive is found
-    while (try reader.readUntilDelimiterOrEof(buffer, '\n')) |line| {
+    while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
         const found_directive = getDirectiveName(line) catch continue;
         if (eql(u8, directive, found_directive)) break;
         // Update position
@@ -86,7 +86,7 @@ pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator
     }
 
     // Save lines
-    while (try reader.readUntilDelimiterOrEof(buffer, '\n')) |line| {
+    while (try reader.readUntilDelimiterOrEof(buffer[0..], '\n')) |line| {
         // Stop if a new directive is found
         if (isDirective(line)) break;
         // Remove comment
@@ -108,7 +108,7 @@ pub fn getDirectiveLines(file: File, directive: []const u8, allocator: Allocator
     return directive_lines.toOwnedSlice();
 }
 
-test "getDirectiveName" {
+test "Top getDirectiveName" {
     const directive1 = "[ foo ]";
     try testing.expectEqualSlices(u8, "foo", try getDirectiveName(directive1));
 
@@ -149,7 +149,7 @@ test "getDirectiveName" {
     try testing.expectError(error.InvalidDirectiveName, getDirectiveName(bad9));
 }
 
-test "getIncludePath" {
+test "Top getIncludePath" {
     const include1 = "#include \"/home/foo\"";
     try testing.expectEqualSlices(u8, "/home/foo", try getIncludePath(include1));
 
@@ -185,4 +185,32 @@ test "getIncludePath" {
 
     const bad9 = "#include \"/ home / foo \"";
     try testing.expectError(error.InvalidPath, getIncludePath(bad9));
+}
+
+test "Top getDirectiveLines" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const handle = tmp.dir;
+
+    var top = try handle.createFile("tmp.top", .{ .read = true });
+    defer top.close();
+
+    const w = top.writer();
+    try w.print("{s}", .{
+        \\[ foo ]
+        \\a
+        \\b
+        \\c
+    });
+
+    try top.seekTo(0);
+
+    const lines = try getDirectiveLines(top, "foo", testing.allocator);
+    defer testing.allocator.free(lines);
+    defer for (lines) |line| testing.allocator.free(line);
+
+    try testing.expect(lines.len == 3);
+    try testing.expectEqualSlices(u8, lines[0], "a"[0..]);
+    try testing.expectEqualSlices(u8, lines[1], "b"[0..]);
+    try testing.expectEqualSlices(u8, lines[2], "c"[0..]);
 }
