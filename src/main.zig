@@ -30,9 +30,9 @@ pub fn getDirectiveName(line: []const u8) ![]const u8 {
     // Extract name
     const name = trim(u8, directive[i + 1 .. j], " ");
     // Check name is not empty
-    if (name.len == 0) return error.MissingDirectiveName;
+    if (name.len == 0) return error.MissingToken;
     // Check name does not contains blanks
-    if (indexOf(u8, name, " ") != null) return error.InvalidDirectiveName;
+    if (indexOf(u8, name, " ") != null) return error.InvalidToken;
 
     return name;
 }
@@ -105,9 +105,9 @@ pub fn getIncludePath(line: []const u8) ![]const u8 {
     // Extract path
     const path = trim(u8, include[i + 1 .. j], " ");
     // Check path is not empty
-    if (path.len == 0) return error.MissingPath;
+    if (path.len == 0) return error.MissingToken;
     // Check path does not contains blanks
-    if (indexOf(u8, path, " ") != null) return error.InvalidPath;
+    if (indexOf(u8, path, " ") != null) return error.InvalidToken;
 
     return path;
 }
@@ -127,6 +127,42 @@ pub fn isIncludePath(line: []const u8) bool {
     if (path.len == 0) return false;
     // Check path does not contains blanks
     if (indexOf(u8, path, " ") != null) return false;
+
+    return true;
+}
+
+pub fn getDefineString(line: []const u8) ![]const u8 {
+    // Remove comment
+    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+    const define = line[0..semicolon];
+    // Check keyword is present
+    if (!startsWith(u8, define, "#define")) return error.MissingKeyword;
+    // Get delimiter index
+    const i = if (indexOf(u8, define, " ")) |index| index else return error.MissingSeparator;
+    // Extract path
+    const string = trim(u8, define[i..], " ");
+    // Check path is not empty
+    if (string.len == 0) return error.MissingToken;
+    // Check path does not contains blanks
+    if (indexOf(u8, string, " ") != null) return error.InvalidToken;
+
+    return string;
+}
+
+pub fn isDefineString(line: []const u8) bool {
+    // Remove comment
+    const semicolon = if (indexOf(u8, line, ";")) |index| index else line.len;
+    const define = line[0..semicolon];
+    // Check keyword is present
+    if (!startsWith(u8, define, "#define")) return false;
+    // Get delimiter index
+    const i = if (indexOf(u8, define, " ")) |index| index else return false;
+    // Extract path
+    const string = trim(u8, define[i..], " ");
+    // Check path is not empty
+    if (string.len == 0) return false;
+    // Check path does not contains blanks
+    if (indexOf(u8, string, " ") != null) return false;
 
     return true;
 }
@@ -268,13 +304,13 @@ test "Top getDirectiveName" {
     try testing.expectError(error.MissingDelimiter, getDirectiveName(bad6));
 
     const bad7 = "[]";
-    try testing.expectError(error.MissingDirectiveName, getDirectiveName(bad7));
+    try testing.expectError(error.MissingToken, getDirectiveName(bad7));
 
     const bad8 = "[    ]";
-    try testing.expectError(error.MissingDirectiveName, getDirectiveName(bad8));
+    try testing.expectError(error.MissingToken, getDirectiveName(bad8));
 
     const bad9 = "[ f o o ]";
-    try testing.expectError(error.InvalidDirectiveName, getDirectiveName(bad9));
+    try testing.expectError(error.InvalidToken, getDirectiveName(bad9));
 }
 
 test "Top getDirectiveContent" {
@@ -343,13 +379,48 @@ test "Top getIncludePath" {
     try testing.expectError(error.MissingDelimiter, getIncludePath(bad6));
 
     const bad7 = "#include \"\"";
-    try testing.expectError(error.MissingPath, getIncludePath(bad7));
+    try testing.expectError(error.MissingToken, getIncludePath(bad7));
 
     const bad8 = "#include \"          \"";
-    try testing.expectError(error.MissingPath, getIncludePath(bad8));
+    try testing.expectError(error.MissingToken, getIncludePath(bad8));
 
     const bad9 = "#include \"/ home / foo \"";
-    try testing.expectError(error.InvalidPath, getIncludePath(bad9));
+    try testing.expectError(error.InvalidToken, getIncludePath(bad9));
+}
+
+test "Top getDefineString" {
+    const define1 = "#define foo";
+    try testing.expectEqualSlices(u8, "foo", try getDefineString(define1));
+
+    const define2 = "#define     foo      ";
+    try testing.expectEqualSlices(u8, "foo", try getDefineString(define2));
+
+    const define3 = "#define foo ; with comment";
+    try testing.expectEqualSlices(u8, "foo", try getDefineString(define3));
+
+    const bad1 = "";
+    try testing.expectError(error.MissingKeyword, getDefineString(bad1));
+
+    const bad2 = "; comment";
+    try testing.expectError(error.MissingKeyword, getDefineString(bad2));
+
+    const bad3 = ";#define";
+    try testing.expectError(error.MissingKeyword, getDefineString(bad3));
+
+    const bad4 = "#definefoo";
+    try testing.expectError(error.MissingSeparator, getDefineString(bad4));
+
+    const bad5 = "#define";
+    try testing.expectError(error.MissingSeparator, getDefineString(bad5));
+
+    const bad6 = "#define          ";
+    try testing.expectError(error.MissingToken, getDefineString(bad6));
+
+    const bad7 = "#define ; foo";
+    try testing.expectError(error.MissingToken, getDefineString(bad7));
+
+    const bad8 = "#define f o o";
+    try testing.expectError(error.InvalidToken, getDefineString(bad8));
 }
 
 test "Top writeMonolith" {
