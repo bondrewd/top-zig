@@ -1,7 +1,7 @@
 // Modules
 const std = @import("std");
 const fs = std.fs;
-const io = std.io;
+const fmt = std.fmt;
 const mem = std.mem;
 const testing = std.testing;
 // Types
@@ -9,7 +9,7 @@ const Dir = fs.Dir;
 const File = fs.File;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
-const FixedBufferStream = io.FixedBufferStream;
+const StringArrayHashMap = std.StringArrayHashMap;
 // Functions
 const eql = mem.eql;
 const copy = mem.copy;
@@ -18,7 +18,7 @@ const split = mem.split;
 const indexOf = mem.indexOf;
 const tokenize = mem.tokenize;
 const startsWith = mem.startsWith;
-const fixedBufferStream = io.fixedBufferStream;
+const parseUnsigned = fmt.parseUnsigned;
 
 pub fn getDirectiveName(line: []const u8) ![]const u8 {
     // Remove comment
@@ -197,6 +197,42 @@ pub const SystemDirective = struct {
         const data = if (content.data) |data| data else "";
         const name = trim(u8, data, "\n");
         try self.setName(name);
+    }
+};
+
+pub const MoleculesDirective = struct {
+    allocator: Allocator,
+    molecules: std.StringArrayHashMap(u64),
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .molecules = StringArrayHashMap(u64).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.molecules.deinit();
+    }
+
+    pub fn addMolecule(self: *Self, name: []const u8, number: u64) !void {
+        try self.molecules.putNoClobber(name, number);
+    }
+
+    pub fn parseMonolith(self: *Self, monolith: []const u8) !void {
+        const content = try getDirectiveContent(monolith, "molecules");
+        const data = if (content.data) |data| data else return;
+
+        var lines = tokenize(u8, data, "\n");
+        while (lines.next()) |line| {
+            var tokens = tokenize(u8, line, " ");
+            const name = tokens.next().?;
+            const number = try parseUnsigned(u64, tokens.next().?, 10);
+            if (tokens.next() != null) return error.UnexpectedToken;
+            try self.addMolecule(name, number);
+        }
     }
 };
 
@@ -490,15 +526,58 @@ test "Top SystemDirective" {
     defer system_directive.deinit();
 
     const monolith =
-        \\[ foo ]
-        \\a
         \\[ system ]
         \\POPC membrane
-        \\[ bar ]
-        \\b
         \\
     ;
 
     try system_directive.parseMonolith(monolith);
     try testing.expectEqualStrings(system_directive.name, "POPC membrane");
+}
+
+test "Top MoleculesDirective" {
+    var molecules_directive = MoleculesDirective.init(testing.allocator);
+    defer molecules_directive.deinit();
+
+    const monolith =
+        \\[ molecules ]
+        \\foo 1
+        \\bar 2
+        \\baz 3
+        \\
+    ;
+
+    try molecules_directive.parseMonolith(monolith);
+
+    var it = molecules_directive.molecules.iterator();
+
+    var mol1 = it.next().?;
+    try testing.expectEqualStrings("foo", mol1.key_ptr.*);
+    try testing.expectEqual(@as(u64, 1), mol1.value_ptr.*);
+
+    var mol2 = it.next().?;
+    try testing.expectEqualStrings("bar", mol2.key_ptr.*);
+    try testing.expectEqual(@as(u64, 2), mol2.value_ptr.*);
+
+    var mol3 = it.next().?;
+    try testing.expectEqualStrings("baz", mol3.key_ptr.*);
+    try testing.expectEqual(@as(u64, 3), mol3.value_ptr.*);
+
+    try testing.expect(it.next() == null);
+}
+
+test "Top MoleculesDirective return error.UnexpectedToken" {
+    var molecules_directive = MoleculesDirective.init(testing.allocator);
+    defer molecules_directive.deinit();
+
+    const monolith =
+        \\[ molecules ]
+        \\foo 1
+        \\bar 2 bad
+        \\baz 3
+        \\
+    ;
+
+    const err = molecules_directive.parseMonolith(monolith);
+    try testing.expectError(error.UnexpectedToken, err);
 }
